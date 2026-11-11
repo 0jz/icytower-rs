@@ -375,6 +375,7 @@ fn shaken(g: &Game, f: impl FnOnce()) {
 #[derive(Clone, Copy, Default)]
 pub struct Prev {
     off: i32,
+    off2: i32, // the scroll one tick before `off`
     x: f64,
     y: f64,
     clock: i32,
@@ -385,13 +386,38 @@ pub struct Prev {
 
 impl Prev {
     pub fn of(g: &Game) -> Self {
-        Prev { off: g.off, x: g.p.x, y: g.p.y, clock: g.clock, angle: g.p.angle, in_combo: g.p.in_combo, reward_scale: g.reward_scale }
+        Prev { off: g.off, off2: g.off, x: g.p.x, y: g.p.y, clock: g.clock, angle: g.p.angle, in_combo: g.p.in_combo, reward_scale: g.reward_scale }
     }
+
+    /// Snapshot before the next tick, remembering this one's scroll too.
+    pub fn step(self, g: &Game) -> Self {
+        Prev { off2: self.off, ..Prev::of(g) }
+    }
+}
+
+/// How far (px) the scroll-tied layers sit from where the current tick draws them.
+/// The tower's own climb moves in whole pixels, at the slowest speed only every other tick
+/// (move, stop, move...), which blending two ticks can't hide. So the scroll is drawn as the
+/// average of the last two ticks, blended between ticks: an even glide at every steady speed,
+/// half a tick's scroll behind. Resets and big jumps aren't smoothed.
+fn scroll_shift(off: i32, prev: Prev, t: f32) -> f32 {
+    let (k, k2) = (off - prev.off, off - prev.off2);
+    if !(0..=32).contains(&k) || !(0..=64).contains(&k2) {
+        return 0.0;
+    }
+    let now = (off + prev.off) as f32 / 2.0;
+    let before = (prev.off + prev.off2) as f32 / 2.0;
+    before + (now - before) * t - off as f32
 }
 
 /// `to` moved back `lag` of the way toward `from`; big jumps (resets) aren't blended.
 pub fn blend(from: f32, to: f32, lag: f32, max: f32) -> f32 {
     if (to - from).abs() <= max { to - (to - from) * lag } else { to }
+}
+
+/// A parallax layer's offset: `off` wrapped every `period` scroll px, times `rate`, unrounded.
+fn parallax(off: i32, period: i32, rate: f32) -> f32 {
+    off.rem_euclid(period) as f32 * rate
 }
 
 /// `t` = how far we are from `prev` (0) to `g` (1).
@@ -402,14 +428,19 @@ fn draw(g: &Game, a: &Assets, ch: &Character, prev: Prev, t: f32) {
 fn draw_frame(g: &Game, a: &Assets, ch: &Character, prev: Prev, t: f32) {
     let off = g.off;
     let lag = 1.0 - t;
-    // everything tied to the scroll sits this many px higher between ticks (skip on resets)
+    // everything tied to the scroll is drawn this many px off its current-tick place
     let k = off - prev.off;
-    let ds = if (0..=32).contains(&k) { -(k as f32) * lag } else { 0.0 };
+    let plain = if (0..=32).contains(&k) { -(k as f32) * lag } else { 0.0 };
+    let ds = scroll_shift(off, prev, t);
+    // the player's y already includes the scroll (plain blending); add the smoothing on top
+    // so they stay exactly on their floor
+    let player_shift = ds - plain;
 
-    // background stripes scroll at half speed
+    // background stripes scroll at half speed (exact, not rounded to whole pixels: the original's
+    // integer halving made it step only every other scroll pixel)
     for (i, id) in g.bg_ids.iter().enumerate() {
-        let y = (i as i32 - 1) * 128 + (off & 255) / 2;
-        draw_texture(&a.bg[*id], 37.0, y as f32 + ds / 2.0, WHITE);
+        let y = (i as i32 - 1) as f32 * 128.0 + parallax(off, 256, 0.5) + ds / 2.0;
+        draw_texture(&a.bg[*id], 37.0, y, WHITE);
     }
     if (0..=578).contains(&(g.hurry_y + 99)) {
         sprite(&a.hurry, 320.0 - a.hurry.width() / 2.0, g.hurry_y as f32 + 2.0 * lag, false);
@@ -429,8 +460,11 @@ fn draw_frame(g: &Game, a: &Assets, ch: &Character, prev: Prev, t: f32) {
             let cx = ((f.start + (f.end - f.start) / 2) * 16 + 8) as f32;
             let sy = (y + 10) as f32 + ds;
             sprite(sign, cx - sign.width() / 2.0, sy, false);
+            // a dark ring under the white number: 16 copies around a 1px circle instead of the
+            // original's 4 one-pixel shifts, so the outline is round and even like the menu letters
             let txt = n.to_string();
-            for (dx, dy) in [(-1.0, 0.0), (1.0, 0.0), (0.0, -1.0), (0.0, 1.0)] {
+            for i in 0..16 {
+                let (dy, dx) = (i as f32 * std::f32::consts::TAU / 16.0).sin_cos();
                 a.small.draw_centre(&txt, cx + dx, sy + 7.0 + dy, Color::from_rgba(55, 55, 55, 255));
             }
             a.small.draw_centre(&txt, cx, sy + 7.0, WHITE);
@@ -466,17 +500,19 @@ fn draw_frame(g: &Game, a: &Assets, ch: &Character, prev: Prev, t: f32) {
     } else {
         (f(8), p.facing_left)
     };
-    let (x, y) = (blend(prev.x as f32, p.x as f32, lag, 64.0), blend(prev.y as f32, p.y as f32, lag, 64.0));
+    let (x, y) = (blend(prev.x as f32, p.x as f32, lag, 64.0), blend(prev.y as f32, p.y as f32, lag, 64.0) + player_shift);
     let (px, py) = (x - (t.width() / 2.0).floor(), y - t.height() + 1.0);
     let from = if prev.angle > p.angle { prev.angle - 256.0 } else { prev.angle }; // wraps at 256
     let angle = blend(from as f32, p.angle as f32, lag, 8.0);
     let spin = angle / 256.0 * std::f32::consts::TAU * if p.facing_left { -1.0 } else { 1.0 };
     draw_texture_ex(t, px, py, WHITE, DrawTextureParams { flip_x: flip, rotation: if p.rotate { spin } else { 0.0 }, ..Default::default() });
 
-    // walls: 1.476x scroll speed, left one mirrored
-    let wy = ((off % 84) as f64 * 1.476) as i32;
+    // walls: 124px blocks every 84 scroll px (the original's 1.476x, truncated to whole pixels,
+    // which stepped 1 and 2 px unevenly; drawn exact here), left one mirrored
+    const WALL_RATE: f32 = 124.0 / 84.0;
+    let wy = parallax(off, 84, WALL_RATE);
     for j in 0..5 {
-        let y = (j * 124 - 124 + wy) as f32 + ds * 1.476;
+        let y = (j * 124 - 124) as f32 + wy + ds * WALL_RATE;
         sprite(&a.side, -57.0, y, true);
         sprite(&a.side, 565.0, y, false);
     }
@@ -533,6 +569,8 @@ fn conf() -> Conf {
         window_width: 960,
         window_height: 720,
         window_resizable: true,
+        // vsync: without it a fast scrolling picture can tear (a visible cut across the screen)
+        platform: miniquad::conf::Platform { swap_interval: Some(1), ..Default::default() },
         ..Default::default()
     }
 }
@@ -578,5 +616,53 @@ async fn main() {
         app.draw(&assets, &chars);
         set_default_camera();
         next_frame().await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Where the scroll is drawn, sampled 4 times per tick, for a per-tick scroll pattern.
+    fn drawn(steps: &[i32]) -> Vec<f32> {
+        let mut offs = vec![0];
+        for s in steps {
+            offs.push(offs.last().unwrap() + s);
+        }
+        let mut out = Vec::new();
+        for n in 2..offs.len() {
+            let prev = Prev { off: offs[n - 1], off2: offs[n - 2], ..Default::default() };
+            for i in 0..4 {
+                let t = i as f32 / 4.0;
+                out.push(offs[n] as f32 + scroll_shift(offs[n], prev, t));
+            }
+        }
+        out
+    }
+
+    fn even(pos: &[f32], step: f32) -> bool {
+        pos.windows(2).all(|w| (w[1] - w[0] - step).abs() < 1e-4)
+    }
+
+    #[test]
+    fn auto_scroll_glides_evenly() {
+        // slowest tower speed: 1px every other tick (game.rs `tick & 1`) -> 0.5px per tick, even
+        assert!(even(&drawn(&[0, 1, 0, 1, 0, 1, 0, 1, 0, 1]), 0.5 / 4.0));
+        // steady speeds stay steady
+        assert!(even(&drawn(&[3; 10]), 3.0 / 4.0));
+        // a reset (scroll jumps back) isn't smoothed
+        let prev = Prev { off: 500, off2: 499, ..Default::default() };
+        assert_eq!(scroll_shift(0, prev, 0.5), 0.0);
+    }
+
+    #[test]
+    fn background_and_walls_move_evenly() {
+        // every scroll pixel moves the background exactly 0.5px and the walls exactly 124/84px,
+        // instead of the original's rounded steps (background: 0,1,0,1; walls: 1,2,1,1,2...)
+        let step = |period, rate| (0..83).map(|o| parallax(o + 1, period, rate) - parallax(o, period, rate)).collect::<Vec<_>>();
+        assert!(step(256, 0.5).iter().all(|d| (d - 0.5).abs() < 1e-4));
+        assert!(step(84, 124.0 / 84.0).iter().all(|d| (d - 124.0 / 84.0).abs() < 1e-4));
+        // the walls wrap seamlessly: one period is exactly one 124px block
+        assert!((parallax(83, 84, 124.0 / 84.0) + 124.0 / 84.0 - 124.0).abs() < 1e-3);
     }
 }

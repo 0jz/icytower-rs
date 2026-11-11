@@ -1043,7 +1043,7 @@ impl App {
                 let flags = if left { LEFT } else { 0 } | if right { RIGHT } else { 0 } | if jump { JUMP } else { 0 };
                 self.recorder.record(&mut self.replay, flags, self.game.p.dead != 0);
             }
-            self.prev = Prev::of(&self.game);
+            self.prev = self.prev.step(&self.game);
             let ev = self.game.tick(left, right, jump);
             self.play_events(ev, a, ch);
         }
@@ -1076,12 +1076,12 @@ impl App {
         let mut events = Vec::new();
         while self.acc >= game::TICK {
             self.acc -= game::TICK;
-            self.prev = Prev::of(&w.game);
             if w.paused {
+                self.prev = Prev::of(&w.game);
                 continue;
             }
             for _ in 0..speed {
-                self.prev = Prev::of(&w.game);
+                self.prev = self.prev.step(&w.game);
                 let ev = w.game.tick_flags(w.input.next());
                 if speed == 1 {
                     events.extend(ev);

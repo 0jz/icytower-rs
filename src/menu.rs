@@ -64,6 +64,7 @@ pub struct Settings {
     pub start_floor: usize,
     pub eye_candy: usize,
     pub fullscreen: bool,
+    pub hd: bool, // upscaled sprites from assets_hd/ when present
     pub sound: i32, // 0..10
     pub music: i32,
     pub keys: [KeyCode; 4], // left, right, jump, pause
@@ -83,6 +84,7 @@ impl Default for Settings {
             start_floor: 0,
             eye_candy: 0,
             fullscreen: false,
+            hd: true,
             sound: 8,
             music: 6,
             keys: [KeyCode::A, KeyCode::D, KeyCode::W, KeyCode::P],
@@ -130,6 +132,7 @@ impl Settings {
                 "start_floor" => s.start_floor = (n as usize).min(FLOOR_STYLES - 1),
                 "eye_candy" => s.eye_candy = (n as usize).min(2),
                 "fullscreen" => s.fullscreen = n != 0,
+                "hd" => s.hd = n != 0,
                 "sound" => s.sound = n.clamp(0, 10),
                 "music" => s.music = n.clamp(0, 10),
                 "rejump" => s.rejump = n != 0,
@@ -158,7 +161,7 @@ impl Settings {
         for (name, k) in ["key_left", "key_right", "key_jump", "key_pause"].iter().zip(self.keys) {
             out += &format!("{name}={}\n", key_name(k));
         }
-        out += &format!("replay_sort={}\nprofile={}\n", self.replay_sort, self.profile);
+        out += &format!("hd={}\nreplay_sort={}\nprofile={}\n", self.hd as i32, self.replay_sort, self.profile);
         let _ = std::fs::write(Self::path(), out); // settings are a convenience; ignore a read-only folder
     }
 
@@ -239,6 +242,7 @@ impl Settings {
                 val("Start floor", &(self.start_floor * 100).to_string()),
                 val("Eye Candy", EYE_CANDY[self.eye_candy]),
                 val("Fullscreen", onoff(self.fullscreen)),
+                val("HD Graphics", onoff(self.hd)),
                 it("Back", Action::Back),
             ],
             MenuId::Sound => vec![
@@ -267,6 +271,7 @@ impl Settings {
             (MenuId::Gfx, 1) => self.start_floor = cycle(self.start_floor, self.unlocked_styles(), dir),
             (MenuId::Gfx, 2) => self.eye_candy = cycle(self.eye_candy, EYE_CANDY.len(), dir),
             (MenuId::Gfx, 3) => self.fullscreen = !self.fullscreen,
+            (MenuId::Gfx, 4) => self.hd = !self.hd,
             (MenuId::Sound, 0) => self.sound = (self.sound + dir).clamp(0, 10),
             (MenuId::Sound, 1) => self.music = (self.music + dir).clamp(0, 10),
             (MenuId::Controls, 4) => self.rejump = !self.rejump,

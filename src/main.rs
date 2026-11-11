@@ -11,6 +11,7 @@ use menu::Settings;
 use macroquad::audio::{load_sound, play_sound, stop_sound, PlaySoundParams, Sound};
 use macroquad::prelude::*;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 const W: f32 = 640.0;
 const H: f32 = 480.0;
@@ -39,10 +40,72 @@ fn asset_dir() -> PathBuf {
         .expect("assets/ not found: run `python -I tools/extract.py .. assets` first")
 }
 
-async fn tex(path: &Path) -> Texture2D {
-    let t = load_texture(&path.to_string_lossy()).await.unwrap_or_else(|e| panic!("{}: {e}", path.display()));
-    t.set_filter(FilterMode::Nearest);
-    t
+/// HD graphics on/off (GFX Options), read by every sprite draw.
+static HD: AtomicBool = AtomicBool::new(true);
+
+pub fn set_hd(on: bool) {
+    HD.store(on, Ordering::Relaxed);
+}
+
+/// A sprite: the original texture plus, when assets_hd/ has it, an upscaled copy.
+/// Sizes are always the original's, so layout and positions don't change with HD on.
+pub struct Tex {
+    sd: Texture2D,
+    hd: Option<Texture2D>,
+}
+
+impl Tex {
+    pub fn width(&self) -> f32 {
+        self.sd.width()
+    }
+
+    pub fn height(&self) -> f32 {
+        self.sd.height()
+    }
+
+    fn pick(&self) -> &Texture2D {
+        match &self.hd {
+            Some(hd) if HD.load(Ordering::Relaxed) => hd,
+            _ => &self.sd,
+        }
+    }
+}
+
+/// Shadows macroquad's: draws a `Tex` at its original size whichever texture is used.
+pub fn draw_texture(t: &Tex, x: f32, y: f32, color: Color) {
+    draw_texture_ex(t, x, y, color, DrawTextureParams::default());
+}
+
+/// Shadows macroquad's: `source` and the default size are in original pixels.
+pub fn draw_texture_ex(t: &Tex, x: f32, y: f32, color: Color, mut params: DrawTextureParams) {
+    let tex = t.pick();
+    let k = tex.width() / t.width();
+    params.dest_size = params.dest_size.or(Some(match params.source {
+        Some(r) => vec2(r.w, r.h),
+        None => vec2(t.width(), t.height()),
+    }));
+    params.source = params.source.map(|r| Rect::new(r.x * k, r.y * k, r.w * k, r.h * k));
+    macroquad::prelude::draw_texture_ex(tex, x, y, color, params);
+}
+
+/// `base/<folder>/<file>.png` and, if present, `base_hd/<folder>/<file>.png` (tools/upscale.py).
+async fn tex(path: &Path) -> Tex {
+    let load = |p: PathBuf| async move { load_texture(&p.to_string_lossy()).await };
+    let sd = load(path.to_path_buf()).await.unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    sd.set_filter(FilterMode::Nearest);
+    let hd_path = path.parent().and_then(|dir| {
+        let base = dir.parent()?;
+        let name = format!("{}_hd", base.file_name()?.to_string_lossy());
+        Some(base.with_file_name(name).join(dir.file_name()?).join(path.file_name()?))
+    });
+    let hd = match hd_path {
+        Some(p) if p.is_file() => load(p).await.ok(),
+        _ => None,
+    };
+    if let Some(hd) = &hd {
+        hd.set_filter(FilterMode::Linear); // shrunk to the window size, so smooth it
+    }
+    Tex { sd, hd }
 }
 
 async fn snd(path: &Path) -> Option<Sound> {
@@ -51,7 +114,7 @@ async fn snd(path: &Path) -> Option<Sound> {
 
 /// The game's own bitmap fonts: one glyph strip for chars 32..127 plus widths.
 struct BmpFont {
-    tex: Texture2D,
+    tex: Tex,
     x: Vec<f32>,
     w: Vec<f32>,
 }
@@ -95,7 +158,7 @@ impl BmpFont {
 }
 
 struct Character {
-    frames: Vec<Texture2D>, // 15 frames, see characters.txt
+    frames: Vec<Tex>, // 15 frames, see characters.txt
     sounds: Vec<Option<Sound>>, // jump lo/mid/hi, greeting, pause, fall, edge, [music]
 }
 
@@ -121,28 +184,28 @@ impl Character {
 }
 
 struct Assets {
-    bg: Vec<Texture2D>,
-    floors: Vec<Texture2D>,
-    signs: Vec<Texture2D>,
-    side: Texture2D,
-    stars: Vec<Texture2D>,
-    rewards: Vec<Texture2D>,
-    clock: Texture2D,
-    clock_hand: Texture2D,
-    meter: Texture2D,
-    liquid: Texture2D,
-    count: Texture2D,
-    hurry: Texture2D,
-    gameover: Texture2D,
-    icon_pb: Texture2D,
-    title_bg: Texture2D,
-    title: Texture2D,
-    menu_bg: Texture2D,
-    bullet: Texture2D,
-    instructions: Texture2D,
+    bg: Vec<Tex>,
+    floors: Vec<Tex>,
+    signs: Vec<Tex>,
+    side: Tex,
+    stars: Vec<Tex>,
+    rewards: Vec<Tex>,
+    clock: Tex,
+    clock_hand: Tex,
+    meter: Tex,
+    liquid: Tex,
+    count: Tex,
+    hurry: Tex,
+    gameover: Tex,
+    icon_pb: Tex,
+    title_bg: Tex,
+    title: Tex,
+    menu_bg: Tex,
+    bullet: Tex,
+    instructions: Tex,
     #[allow(dead_code)] // in data.dat but never drawn by the original
-    highscore: Texture2D,
-    hisc: [Texture2D; 3],
+    highscore: Tex,
+    hisc: [Tex; 3],
     black: BmpFont,
     big: BmpFont,
     med: BmpFont,
@@ -159,23 +222,23 @@ struct Assets {
     menu_move: Option<Sound>,
     menu_select: Option<Sound>,
     mono: BmpFont,
-    faces: Vec<Texture2D>,
-    face_shadow: Texture2D,
-    replay_bg: Texture2D,
-    replay_bg_med: Texture2D,
-    replay_bg_sml: Texture2D,
-    profile_buttons: Texture2D,
-    replay_buttons: Texture2D,
-    vcr: Texture2D,
-    vcr_right: Texture2D,
-    vcr_up: Texture2D,
-    ranks: Vec<Texture2D>,
-    bt_yes: Texture2D,
-    bt_yes_2: Texture2D,
-    bt_no: Texture2D,
-    bt_esc: Texture2D,
-    bt_up_dn: Texture2D,
-    sort_buttons: [Texture2D; 5], // ALL, then the highlight for name, score, combo, floor
+    faces: Vec<Tex>,
+    face_shadow: Tex,
+    replay_bg: Tex,
+    replay_bg_med: Tex,
+    replay_bg_sml: Tex,
+    profile_buttons: Tex,
+    replay_buttons: Tex,
+    vcr: Tex,
+    vcr_right: Tex,
+    vcr_up: Tex,
+    ranks: Vec<Tex>,
+    bt_yes: Tex,
+    bt_yes_2: Tex,
+    bt_no: Tex,
+    bt_esc: Tex,
+    bt_up_dn: Tex,
+    sort_buttons: [Tex; 5], // ALL, then the highlight for name, score, combo, floor
 }
 
 impl Assets {
@@ -264,7 +327,7 @@ impl Assets {
     }
 }
 
-fn sprite(t: &Texture2D, x: f32, y: f32, flip: bool) {
+fn sprite(t: &Tex, x: f32, y: f32, flip: bool) {
     draw_texture_ex(t, x, y, WHITE, DrawTextureParams { flip_x: flip, ..Default::default() });
 }
 

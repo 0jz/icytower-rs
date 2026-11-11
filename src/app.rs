@@ -1,5 +1,5 @@
 // Screens, menus, profiles and replays, laid out like the original (main.c / profile.c / replay.c).
-use super::{blend, draw, shaken, sfx, switch_music, Assets, BmpFont, Character, Prev, H, W};
+use super::{blend, draw, draw_texture, draw_texture_ex, set_hd, shaken, sfx, switch_music, Assets, BmpFont, Character, Prev, Tex, H, W};
 use crate::game::{self, Game, Sfx};
 use crate::hisc::{self, Tables};
 use crate::menu::{self, Action, MenuId, Settings};
@@ -343,6 +343,7 @@ impl App {
         }
         let profile = profile::load_profile(&settings.profile);
         set_fullscreen(settings.fullscreen);
+        set_hd(settings.hd);
         let mut app = App {
             game: Game::new(1, settings.rules(false)),
             settings,
@@ -903,6 +904,7 @@ impl App {
             Action::Change if dir != 0 => {
                 self.settings.change(self.menu, self.sel, dir);
                 set_fullscreen(self.settings.fullscreen);
+                set_hd(self.settings.hd);
                 if let Some(m) = &self.music {
                     set_sound_volume(m, self.settings.music as f32 / 10.0);
                 }
@@ -1459,7 +1461,7 @@ fn text_block(font: &BmpFont, text: &str, x: f32, mut y: f32) -> f32 {
 fn draw_vcr(a: &Assets, w: &Watch) {
     let (x, y) = (251.0, 412.0);
     draw_texture(&a.vcr, x, y, WHITE);
-    let lit = |dx: f32, t: &Texture2D| draw_texture(t, x + dx, y + 44.0, WHITE);
+    let lit = |dx: f32, t: &Tex| draw_texture(t, x + dx, y + 44.0, WHITE);
     if w.paused {
         lit(39.0, &a.vcr_up);
     } else if is_key_down(KeyCode::Up) {

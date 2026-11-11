@@ -16,6 +16,7 @@
 ## Commands
 - Extract assets: `python -I tools/extract.py .. assets`
 - Build HD assets: `python -I tools/upscale.py assets assets_hd`
+- Plan C traced HD (smooth region contours, gameplay sprites by default; missing ones fall back to the originals): `python -I tools/trace.py assets assets_hd [globs]`
 - Test: `cargo test --offline`
 - Run: `cargo run --release --offline`
 

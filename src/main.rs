@@ -94,7 +94,7 @@ pub fn draw_texture_ex(t: &Tex, x: f32, y: f32, color: Color, mut params: DrawTe
     macroquad::prelude::draw_texture_ex(tex, x, y, color, params);
 }
 
-/// `base/<folder>/<file>.png` and, if present, `base_hd/<folder>/<file>.png` (tools/upscale.py).
+/// `base/<folder>/<file>.png` and, if present, `base_hd/<folder>/<file>.png` (tools/trace.py).
 async fn tex(path: &Path) -> Tex {
     let load = |p: PathBuf| async move { load_texture(&p.to_string_lossy()).await };
     let sd = load(path.to_path_buf()).await.unwrap_or_else(|e| panic!("{}: {e}", path.display()));

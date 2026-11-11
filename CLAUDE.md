@@ -11,12 +11,12 @@
 - `tools/extract.py` — decodes the original Allegro 4 datafiles into `assets/` (PNG sprites, OGG sounds, font strips).
 - `assets/` — generated; `data/` (data.dat), `sfx15/`, one folder per character (harold, dave, jane, wendy).
 - The original game lives one level up (`../icytower15.exe`, `../data`, `../characters`).
-- HD (plan B): `tools/upscale.py` builds `assets_hd/` (Scale2x twice = 4x; git-ignored). main.rs `Tex` holds sd + hd textures and always reports the original size; its `draw_texture(_ex)` shadow macroquad's, so draw code is unchanged. GFX Options → HD Graphics.
+- HD: `tools/trace.py` builds `assets_hd/` (sprites traced into smooth 4x art; git-ignored). main.rs `Tex` holds sd + hd textures and always reports the original size; its `draw_texture(_ex)` shadow macroquad's, so draw code is unchanged. HD fonts have a 12px gutter per glyph (`FONT_GUTTER` = trace.py `PAD*SCALE`) that `BmpFont` draws. GFX Options → HD Graphics.
 
 ## Commands
 - Extract assets: `python -I tools/extract.py .. assets`
-- Build HD assets: `python -I tools/upscale.py assets assets_hd`
-- Plan C traced HD (smooth region contours, gameplay sprites by default; missing ones fall back to the originals): `python -I tools/trace.py assets assets_hd [globs]`
+- Build HD assets (all, ~2.5 min): `python -I tools/trace.py assets assets_hd "*/*.png"`; just fonts: `"data/FONT_*.png"`; missing ones fall back to the originals
+- Check HD font thickness vs the originals: `python -I tools/trace.py assets assets_hd --check-fonts`
 - Test: `cargo test --offline`
 - Run: `cargo run --release --offline`
 

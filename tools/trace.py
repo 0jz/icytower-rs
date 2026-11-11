@@ -9,16 +9,18 @@ pixels, so shading blends smoothly without bleeding across outlines.
     python -I tools/trace.py assets assets_hd              # gameplay sprites (first pass)
     python -I tools/trace.py assets assets_hd "data/*.png" # any globs under assets/
 """
+import os
 import sys
 from pathlib import Path
 
 import numpy as np
 from PIL import Image
-from scipy.ndimage import gaussian_filter, zoom
+from scipy.ndimage import distance_transform_edt, gaussian_filter, zoom
 
 SCALE = 4
 SIGMA = 1.6  # contour smoothing, in 4x pixels: higher = rounder shapes, but thin details fade
 MAX_COLOURS = 32  # regions per sprite; more keeps detail, fewer gives cleaner shapes
+GRADIENT = 2.0  # width in 4x pixels of the colour blend along region borders (0 = hard; 4+ softens outlines)
 
 GAMEPLAY = [
     "data/BGTILE*.png", "data/SIDEBLOCK.png", "data/FLOOR*.png", "data/SIGN*.png",
@@ -56,7 +58,7 @@ def shrink2(img: np.ndarray) -> np.ndarray:
 
 def trace(rgba: np.ndarray, wrap: bool = False, max_colours: int = MAX_COLOURS, sigma: float = SIGMA,
           flat: bool = False, split: float | None = None, ink: bool = False, scale: int = SCALE,
-          level: float = 0.5, light_bias: float = 1.0) -> np.ndarray:
+          level: float = 0.5, light_bias: float = 1.0, gradient: float = 0.0) -> np.ndarray:
     """flat: fill each region with one solid colour instead of shading it from its own pixels.
     scale: output size multiple; sigma is in output pixels.
     level: where the shape's edge falls in the blurred mask (lower = thicker letters).
@@ -82,6 +84,7 @@ def trace(rgba: np.ndarray, wrap: bool = False, max_colours: int = MAX_COLOURS, 
     lightest = lab.max()
     best = np.full((h * scale, w * scale), -1.0, np.float32)
     out = np.zeros((h * scale, w * scale, 4), np.float32)
+    owner = np.zeros((h * scale, w * scale), np.int32)  # which region owns each output pixel (0 = none)
     for l in np.unique(lab):
         if l == 0:
             continue
@@ -89,6 +92,7 @@ def trace(rgba: np.ndarray, wrap: bool = False, max_colours: int = MAX_COLOURS, 
         weight = up(m) * (light_bias if l == lightest and lightest > 1 else 1.0)
         win = (weight > best) & shape
         best[win] = weight[win]
+        owner[win] = l
         if flat:
             out[..., :3][win] = np.median(rgb[lab == l], axis=0)
         else:
@@ -96,7 +100,33 @@ def trace(rgba: np.ndarray, wrap: bool = False, max_colours: int = MAX_COLOURS, 
             for c in range(3):
                 out[..., c][win] = (up(rgb[..., c] * m) / den)[win]
         out[..., 3][win] = 255.0
+    if gradient > 0:
+        out = blend_borders(out, owner, gradient, wrap)
     return np.clip(out + 0.5, 0, 255).astype(np.uint8)
+
+
+def blend_borders(out: np.ndarray, owner: np.ndarray, width: float, wrap: bool = False) -> np.ndarray:
+    """In-between colours: near every border between two regions (or a region and transparency),
+    fade toward a blurred mix of both sides; the further from the border, the less."""
+    edge = np.zeros(owner.shape, bool)
+    dx = owner[:, 1:] != owner[:, :-1]
+    dy = owner[1:, :] != owner[:-1, :]
+    edge[:, 1:] |= dx
+    edge[:, :-1] |= dx
+    edge[1:, :] |= dy
+    edge[:-1, :] |= dy
+    d = distance_transform_edt(~edge)
+    t = np.clip(1.0 - d / width, 0.0, 1.0)
+    t = (t * t * (3.0 - 2.0 * t))[..., None]  # smoothstep
+    mode = "wrap" if wrap else "nearest"
+    a = gaussian_filter(out[..., 3], width / 2, mode=mode)
+    rgb = np.stack([gaussian_filter(out[..., c] * out[..., 3], width / 2, mode=mode) for c in range(3)], axis=-1)
+    rgb = rgb / np.maximum(a, 1e-6)[..., None]
+    mixed = np.concatenate([rgb, a[..., None]], axis=-1)
+    blended = out * (1.0 - t) + mixed * t
+    # keep the original colour where the blurred side is fully transparent
+    blended[..., :3] = np.where(blended[..., 3:4] > 0, blended[..., :3], out[..., :3])
+    return blended
 
 
 FONT_SPLIT = 170  # letters are just dark (outline, inner lines) or light (fill), by brightness
@@ -185,7 +215,8 @@ def main() -> None:
         if widths.is_file():
             out = trace_font(rgba, [int(w) for w in widths.read_text().split()], ink="BLACK" in f.name)
         else:
-            out = trace(rgba, wrap=f.name.startswith(WRAPS))
+            gradient = float(os.environ["TRACE_GRADIENT"]) if "TRACE_GRADIENT" in os.environ else GRADIENT
+            out = trace(rgba, wrap=f.name.startswith(WRAPS), gradient=gradient)
         dst = dst_root / f.relative_to(src_root)
         dst.parent.mkdir(parents=True, exist_ok=True)
         Image.fromarray(out, "RGBA").save(dst)

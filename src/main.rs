@@ -288,12 +288,21 @@ pub struct Prev {
     off: i32,
     x: f64,
     y: f64,
+    clock: i32,
+    angle: f64,
+    in_combo: i32,
+    reward_scale: f64,
 }
 
 impl Prev {
     pub fn of(g: &Game) -> Self {
-        Prev { off: g.off, x: g.p.x, y: g.p.y }
+        Prev { off: g.off, x: g.p.x, y: g.p.y, clock: g.clock, angle: g.p.angle, in_combo: g.p.in_combo, reward_scale: g.reward_scale }
     }
+}
+
+/// `to` moved back `lag` of the way toward `from`; big jumps (resets) aren't blended.
+pub fn blend(from: f32, to: f32, lag: f32, max: f32) -> f32 {
+    if (to - from).abs() <= max { to - (to - from) * lag } else { to }
 }
 
 /// `t` = how far we are from `prev` (0) to `g` (1).
@@ -368,10 +377,11 @@ fn draw_frame(g: &Game, a: &Assets, ch: &Character, prev: Prev, t: f32) {
     } else {
         (f(8), p.facing_left)
     };
-    let blend = |from: f64, to: f64| if (to - from).abs() < 64.0 { to - (to - from) * lag as f64 } else { to };
-    let (x, y) = (blend(prev.x, p.x) as f32, blend(prev.y, p.y) as f32);
+    let (x, y) = (blend(prev.x as f32, p.x as f32, lag, 64.0), blend(prev.y as f32, p.y as f32, lag, 64.0));
     let (px, py) = (x - (t.width() / 2.0).floor(), y - t.height() + 1.0);
-    let spin = (p.angle / 256.0 * std::f64::consts::TAU) as f32 * if p.facing_left { -1.0 } else { 1.0 };
+    let from = if prev.angle > p.angle { prev.angle - 256.0 } else { prev.angle }; // wraps at 256
+    let angle = blend(from as f32, p.angle as f32, lag, 8.0);
+    let spin = angle / 256.0 * std::f32::consts::TAU * if p.facing_left { -1.0 } else { 1.0 };
     draw_texture_ex(t, px, py, WHITE, DrawTextureParams { flip_x: flip, rotation: if p.rotate { spin } else { 0.0 }, ..Default::default() });
 
     // walls: 1.476x scroll speed, left one mirrored
@@ -393,7 +403,8 @@ fn draw_frame(g: &Game, a: &Assets, ch: &Character, prev: Prev, t: f32) {
     if (201..=479).contains(&g.hurry_y) {
         (dx, dy) = jiggle(lc + 2, lc + 3);
     }
-    let turn = (g.clock % 1500) as f32 / 1500.0; // C remainder: negative while the clock runs backwards
+    let clock = blend(prev.clock as f32, g.clock as f32, lag, 1.0);
+    let turn = (clock % 1500.0) / 1500.0; // C remainder: negative while the clock runs backwards
     draw_texture_ex(&a.clock_hand, 34.0 + dx, 28.0 + dy, WHITE, DrawTextureParams {
         rotation: turn * std::f32::consts::TAU,
         ..Default::default()
@@ -401,7 +412,7 @@ fn draw_frame(g: &Game, a: &Assets, ch: &Character, prev: Prev, t: f32) {
 
     // combo meter drains over the combo's 100 ticks
     sprite(&a.meter, 22.0, 100.0, false);
-    let fill = p.in_combo.clamp(0, 100) as f32;
+    let fill = blend(prev.in_combo as f32, p.in_combo as f32, lag, 1.0).clamp(0.0, 100.0);
     let bubble = if p.in_combo != 0 {
         draw_texture_ex(&a.liquid, 33.0, 219.0 - fill, WHITE, DrawTextureParams {
             source: Some(Rect::new(0.0, 100.0 - fill, 16.0, fill)),
@@ -418,7 +429,7 @@ fn draw_frame(g: &Game, a: &Assets, ch: &Character, prev: Prev, t: f32) {
 
     if g.reward_time > 0 && g.reward_scale > 0.0 {
         let r = &a.rewards[g.reward_idx];
-        let s = g.reward_scale.min(1.0) as f32;
+        let s = blend(prev.reward_scale as f32, g.reward_scale as f32, lag, 0.5).min(1.0);
         let (w, h) = (r.width() * s, r.height() * s);
         draw_texture_ex(r, 320.0 - w / 2.0, 200.0 - h / 2.0, WHITE, DrawTextureParams { dest_size: Some(vec2(w, h)), ..Default::default() });
     }

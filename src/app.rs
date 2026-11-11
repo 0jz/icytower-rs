@@ -1,5 +1,5 @@
 // Screens, menus, profiles and replays, laid out like the original (main.c / profile.c / replay.c).
-use super::{draw, shaken, sfx, switch_music, Assets, BmpFont, Character, Prev, H, W};
+use super::{blend, draw, shaken, sfx, switch_music, Assets, BmpFont, Character, Prev, H, W};
 use crate::game::{self, Game, Sfx};
 use crate::hisc::{self, Tables};
 use crate::menu::{self, Action, MenuId, Settings};
@@ -167,7 +167,18 @@ impl Initials {
     }
 }
 
+/// Menu/results animation values one menu tick ago, for drawing between ticks.
+#[derive(Clone, Copy, Default)]
+struct UiPrev {
+    res_y: f32,
+    rank_y: f32,
+    summary_x: f32,
+    hs_y: f32,
+    hs_dim: f32,
+}
+
 /// view_scores(): the paper with all 15 tables slides up over the darkened menu.
+#[derive(Clone, Copy)]
 struct HsView {
     y: f32,
     target: f32,
@@ -309,6 +320,7 @@ pub struct App {
     music: Option<Sound>,
     acc: f64,
     prev: Prev, // state before the latest game tick, for smooth drawing
+    ui_prev: UiPrev, // same for the menu/results animations
     t: u64, // title animation ticks
     view_back: Screen,
     pub quit: bool,
@@ -375,6 +387,7 @@ impl App {
             music: None,
             acc: 0.0,
             prev: Prev::default(),
+            ui_prev: UiPrev::default(),
             t: 0,
             view_back: Screen::Menu,
             quit: false,
@@ -553,6 +566,13 @@ impl App {
 
     /// Title and results animation run on the original's 50Hz menu timer, not the frame rate.
     fn ui_tick(&mut self) {
+        self.ui_prev = UiPrev {
+            res_y: self.res_y as f32,
+            rank_y: self.rank_y as f32,
+            summary_x: self.summary_x,
+            hs_y: self.hs.y,
+            hs_dim: self.hs.dim,
+        };
         self.t += 1;
         // main_menu_callback(): new_rand() % 198 == 1 changes Harold's face
         if macroquad::rand::gen_range(0, 198) == 1 {
@@ -1077,7 +1097,12 @@ impl App {
             Screen::Instructions => draw_texture(&a.instructions, 0.0, 0.0, WHITE),
             Screen::HighScores => {
                 self.draw_title(a);
-                draw_highscores(a, &self.hisc, &self.hs);
+                let hs = HsView {
+                    y: self.ui_blend(self.ui_prev.hs_y, self.hs.y),
+                    dim: self.ui_blend(self.ui_prev.hs_dim, self.hs.dim),
+                    ..self.hs
+                };
+                draw_highscores(a, &self.hisc, &hs);
             }
             Screen::ViewProfile => {
                 self.draw_back(a, chars);
@@ -1142,7 +1167,7 @@ impl App {
             draw_alert(a, al);
         }
         if let Some(t) = self.thanks {
-            draw_thanks(a, t);
+            draw_thanks(a, t as f32 + self.ui_frac());
         }
     }
 
@@ -1161,12 +1186,28 @@ impl App {
         self.draw_face(a);
     }
 
+    /// How far the 50Hz menu timer is into its next tick (0..1).
+    fn ui_frac(&self) -> f32 {
+        (self.ui_acc / game::TICK) as f32
+    }
+
+    /// A menu-timer value drawn between its last two ticks.
+    fn ui_blend(&self, from: f32, to: f32) -> f32 {
+        blend(from, to, 1.0 - self.ui_frac(), 128.0)
+    }
+
+    /// Menu timer ticks, fractional.
+    fn ui_time(&self) -> f32 {
+        self.t as f32 + self.ui_frac()
+    }
+
     fn draw_face(&self, a: &Assets) {
         // main_menu_callback(): the head bobs 10px and tilts (Allegro angles, 256 per turn);
         // the shadow sits 2px right and 4px down at 110/255 opacity
-        let deg = |n: u64| (n as f32 * 360.0 / 256.0).to_radians();
-        let bob = (deg(self.t * 5).sin() * 10.0).round();
-        let rot = deg(self.t * 3).sin() * 5.0 * std::f32::consts::TAU / 256.0;
+        let deg = |n: f32| (n * 360.0 / 256.0).to_radians();
+        let t = self.ui_time();
+        let bob = deg(t * 5.0).sin() * 10.0;
+        let rot = deg(t * 3.0).sin() * 5.0 * std::f32::consts::TAU / 256.0;
         let params = DrawTextureParams { rotation: rot, ..Default::default() };
         draw_texture_ex(&a.face_shadow, 402.0, 16.0 + bob, Color::new(1.0, 1.0, 1.0, 110.0 / 255.0), params.clone());
         draw_texture_ex(&a.faces[self.face], 400.0, 12.0 + bob, WHITE, params);
@@ -1193,7 +1234,7 @@ impl App {
         // greeting scroller in a translucent bar along the bottom
         draw_rectangle(0.0, 462.0, W, 18.0, Color::new(0.0, 0.0, 0.0, 0.6));
         let len = a.small.width(GREETING);
-        let x = W - (self.t as f32 % (len + W));
+        let x = W - (self.ui_time() % (len + W));
         a.small.draw(GREETING, x + 1.0, 462.0, Color::from_rgba(150, 150, 150, 255));
         a.small.draw(GREETING, x, 462.0, Color::from_rgba(200, 200, 200, 255));
     }
@@ -1201,7 +1242,9 @@ impl App {
     fn draw_game_over(&self, a: &Assets) {
         // draw_results(): GAME OVER, then Score / Floor / Best Combo with personal-best icons
         let g = &self.game;
-        let y = self.res_y as i32 as f32;
+        let res_y = self.ui_blend(self.ui_prev.res_y, self.res_y as f32);
+        let rank_y = self.ui_blend(self.ui_prev.rank_y, self.rank_y as f32);
+        let y = res_y;
         draw_texture(&a.gameover, 320.0 - (a.gameover.width() / 2.0).floor(), y, WHITE);
         let rows = [("Score", g.final_score(), self.bests.score), ("Floor", g.p.level, self.bests.floor), ("Best Combo", g.p.best_combo, self.bests.combo)];
         let counts = !self.custom && self.profile.name != "guest";
@@ -1216,7 +1259,7 @@ impl App {
         }
         if let Some(ini) = &self.initials {
             // "Enter your initials" under the results; the current letter blinks
-            let base = 2.0 * self.res_y as f32;
+            let base = 2.0 * res_y;
             a.med.draw_centre("Enter your initials", 320.0, base + 80.0, WHITE);
             let blink = ini.blink & 4 != 0;
             for (i, &c) in ini.slots.iter().enumerate() {
@@ -1230,8 +1273,8 @@ impl App {
         }
         let rank = self.profile.rank_id();
         if counts && rank > self.rank_before {
-            draw_texture(&a.ranks[rank], 20.0, self.rank_y as f32, WHITE);
-            a.med.draw("rank up!", 20.0, self.rank_y as f32 + 70.0, WHITE);
+            draw_texture(&a.ranks[rank], 20.0, rank_y, WHITE);
+            a.med.draw("rank up!", 20.0, rank_y + 70.0, WHITE);
         }
         if self.post == Post::Menu {
             // replay_menu_callback() blacks out every other row and column; 1px lines turn into
@@ -1245,7 +1288,8 @@ impl App {
             draw_rectangle(0.0, 0.0, W, h, Color::new(0.0, 0.0, 0.0, 110.0 / 255.0));
         }
         let len = a.small.width(&self.summary);
-        let x = if self.summary_x < -len { W - ((-len - self.summary_x) % (len + W)) } else { self.summary_x };
+        let sx = self.ui_blend(self.ui_prev.summary_x, self.summary_x);
+        let x = if sx < -len { W - ((-len - sx) % (len + W)) } else { sx };
         a.small.draw(&self.summary, x + 1.0, 0.0, Color::from_rgba(150, 150, 150, 255));
         a.small.draw(&self.summary, x, 0.0, Color::from_rgba(200, 200, 200, 255));
     }
@@ -1453,17 +1497,14 @@ const THANKS_TICKS: i32 = 150; // show_credits() stays up to 3s (ESC skips)
 const FADE_TICKS: i32 = 8;
 
 /// show_credits(): the title, "Thanks for playing!" and the credits, faded in and out.
-fn draw_thanks(a: &Assets, t: i32) {
+fn draw_thanks(a: &Assets, t: f32) {
     draw_texture(&a.title_bg, 0.0, 0.0, WHITE);
     draw_texture(&a.title, 320.0 - (a.title.width() / 2.0).floor(), 10.0, WHITE);
     a.big.draw_centre("Thanks for playing!", 320.0, 280.0, WHITE);
     a.med.draw_centre("DESIGN & CODING: Johan Peitz", 320.0, 360.0, WHITE);
     a.med.draw_centre("GRAPHICS: Emanuel Garnheim", 320.0, 390.0, WHITE);
-    let black = if t < FADE_TICKS {
-        1.0 - t as f32 / FADE_TICKS as f32
-    } else {
-        ((t - THANKS_TICKS) as f32 / FADE_TICKS as f32).clamp(0.0, 1.0)
-    };
+    let (fade, thanks) = (FADE_TICKS as f32, THANKS_TICKS as f32);
+    let black = if t < fade { 1.0 - t / fade } else { ((t - thanks) / fade).clamp(0.0, 1.0) };
     dim(black);
 }
 

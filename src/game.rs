@@ -95,6 +95,12 @@ impl Star {
         let r = |v: i32| (v >> 16) + ((v & 0x8000) >> 15);
         (r(self.x), r(self.y))
     }
+
+    /// Position `lag` ticks back along this tick's motion, for drawing between ticks.
+    pub fn pos_at(&self, lag: f32) -> (f32, f32) {
+        let at = |v: i32, s: i32| (v as f32 - s as f32 * lag) / 65536.0;
+        (at(self.x, self.sx), at(self.y, self.sy - 0x4ccd)) // sy already has this tick's gravity added
+    }
 }
 
 const MAX_STARS: usize = 512;
@@ -825,6 +831,17 @@ mod tests {
             g.post_tick();
         }
         assert!(g.stars[0].pos().1 > y0 && g.p.shake == 0);
+    }
+
+    #[test]
+    fn star_pos_at_steps_back_one_tick() {
+        let mut g = Game::new(1, Rules::default());
+        g.add_star(320, 200);
+        g.update_stars();
+        let before = (g.stars[0].x as f32 / 65536.0, g.stars[0].y as f32 / 65536.0);
+        g.update_stars();
+        let (x, y) = g.stars[0].pos_at(1.0);
+        assert!((x - before.0).abs() < 1e-3 && (y - before.1).abs() < 1e-3);
     }
 
     #[test]

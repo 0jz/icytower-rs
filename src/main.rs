@@ -281,26 +281,46 @@ fn shaken(g: &Game, f: impl FnOnce()) {
     }
 }
 
-fn draw(g: &Game, a: &Assets, ch: &Character) {
-    shaken(g, || draw_frame(g, a, ch));
+/// The scroll and player position one tick ago. Logic stays at 50Hz (replays depend on it);
+/// drawing blends from here toward the current tick so motion is smooth at any refresh rate.
+#[derive(Clone, Copy, Default)]
+pub struct Prev {
+    off: i32,
+    x: f64,
+    y: f64,
 }
 
-fn draw_frame(g: &Game, a: &Assets, ch: &Character) {
+impl Prev {
+    pub fn of(g: &Game) -> Self {
+        Prev { off: g.off, x: g.p.x, y: g.p.y }
+    }
+}
+
+/// `t` = how far we are from `prev` (0) to `g` (1).
+fn draw(g: &Game, a: &Assets, ch: &Character, prev: Prev, t: f32) {
+    shaken(g, || draw_frame(g, a, ch, prev, t.clamp(0.0, 1.0)));
+}
+
+fn draw_frame(g: &Game, a: &Assets, ch: &Character, prev: Prev, t: f32) {
     let off = g.off;
+    let lag = 1.0 - t;
+    // everything tied to the scroll sits this many px higher between ticks (skip on resets)
+    let k = off - prev.off;
+    let ds = if (0..=32).contains(&k) { -(k as f32) * lag } else { 0.0 };
 
     // background stripes scroll at half speed
     for (i, id) in g.bg_ids.iter().enumerate() {
         let y = (i as i32 - 1) * 128 + (off & 255) / 2;
-        draw_texture(&a.bg[*id], 37.0, y as f32, WHITE);
+        draw_texture(&a.bg[*id], 37.0, y as f32 + ds / 2.0, WHITE);
     }
     if (0..=578).contains(&(g.hurry_y + 99)) {
-        sprite(&a.hurry, 320.0 - a.hurry.width() / 2.0, g.hurry_y as f32, false);
+        sprite(&a.hurry, 320.0 - a.hurry.width() / 2.0, g.hurry_y as f32 + 2.0 * lag, false);
     }
 
     // floors and floor-number signs
     for (n, f, y, s, sign) in g.visible_floors() {
         if !(-48..=496).contains(&y) { continue; }
-        let fy = (y - 6) as f32;
+        let fy = (y - 6) as f32 + ds;
         sprite(&a.floors[s], (f.start * 16 - 5) as f32, fy, false);
         for t in f.start + 1..f.end {
             sprite(&a.floors[s + 1], (t * 16) as f32, fy, false);
@@ -309,7 +329,7 @@ fn draw_frame(g: &Game, a: &Assets, ch: &Character) {
         if n > 0 && n % 10 == 0 {
             let sign = &a.signs[sign];
             let cx = ((f.start + (f.end - f.start) / 2) * 16 + 8) as f32;
-            let sy = (y + 10) as f32;
+            let sy = (y + 10) as f32 + ds;
             sprite(sign, cx - sign.width() / 2.0, sy, false);
             let txt = n.to_string();
             for (dx, dy) in [(-1.0, 0.0), (1.0, 0.0), (0.0, -1.0), (0.0, 1.0)] {
@@ -320,8 +340,8 @@ fn draw_frame(g: &Game, a: &Assets, ch: &Character) {
     }
 
     for s in &g.stars {
-        let (x, y) = s.pos();
-        sprite(&a.stars[s.kind], x as f32, y as f32, false);
+        let (x, y) = s.pos_at(lag);
+        sprite(&a.stars[s.kind], x, y, false);
     }
 
     // player: frames 1-3 idle (1,10,11), 2-5 walk, 6-8 jump, 9 straight jump, 12 chock, 13 spin, 14-15 edge
@@ -348,14 +368,16 @@ fn draw_frame(g: &Game, a: &Assets, ch: &Character) {
     } else {
         (f(8), p.facing_left)
     };
-    let (px, py) = ((p.x as i32) as f32 - (t.width() / 2.0).floor(), (p.y as i32) as f32 - t.height() + 1.0);
+    let blend = |from: f64, to: f64| if (to - from).abs() < 64.0 { to - (to - from) * lag as f64 } else { to };
+    let (x, y) = (blend(prev.x, p.x) as f32, blend(prev.y, p.y) as f32);
+    let (px, py) = (x - (t.width() / 2.0).floor(), y - t.height() + 1.0);
     let spin = (p.angle / 256.0 * std::f64::consts::TAU) as f32 * if p.facing_left { -1.0 } else { 1.0 };
     draw_texture_ex(t, px, py, WHITE, DrawTextureParams { flip_x: flip, rotation: if p.rotate { spin } else { 0.0 }, ..Default::default() });
 
     // walls: 1.476x scroll speed, left one mirrored
     let wy = ((off % 84) as f64 * 1.476) as i32;
     for j in 0..5 {
-        let y = (j * 124 - 124 + wy) as f32;
+        let y = (j * 124 - 124 + wy) as f32 + ds * 1.476;
         sprite(&a.side, -57.0, y, true);
         sprite(&a.side, 565.0, y, false);
     }

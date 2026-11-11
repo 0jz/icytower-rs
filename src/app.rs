@@ -1,5 +1,5 @@
 // Screens, menus, profiles and replays, laid out like the original (main.c / profile.c / replay.c).
-use super::{draw, shaken, sfx, switch_music, Assets, BmpFont, Character, H, W};
+use super::{draw, shaken, sfx, switch_music, Assets, BmpFont, Character, Prev, H, W};
 use crate::game::{self, Game, Sfx};
 use crate::hisc::{self, Tables};
 use crate::menu::{self, Action, MenuId, Settings};
@@ -308,6 +308,7 @@ pub struct App {
     watch: Option<Watch>,
     music: Option<Sound>,
     acc: f64,
+    prev: Prev, // state before the latest game tick, for smooth drawing
     t: u64, // title animation ticks
     view_back: Screen,
     pub quit: bool,
@@ -373,6 +374,7 @@ impl App {
             watch: None,
             music: None,
             acc: 0.0,
+            prev: Prev::default(),
             t: 0,
             view_back: Screen::Menu,
             quit: false,
@@ -401,6 +403,7 @@ impl App {
         self.seed = new_seed();
         let rules = self.settings.rules(custom);
         self.game = Game::new(self.seed, rules);
+        self.prev = Prev::of(&self.game);
         self.replay = Replay::new(&self.profile.name, self.seed, rules, self.settings.character);
         self.recorder = Recorder::new();
         self.post = Post::Playing;
@@ -414,7 +417,9 @@ impl App {
     fn start_watch(&mut self, a: &Assets, chars: &[Character], rep: Replay, back: Screen) {
         let ch = &chars[rep.character.min(chars.len() - 1)];
         switch_music(&mut self.music, ch.sound(7).or(a.beat.as_ref()), &self.settings);
-        self.watch = Some(Watch { game: Game::new(rep.seed, rep.rules), input: rep.player(), rep, paused: false, back });
+        let game = Game::new(rep.seed, rep.rules);
+        self.prev = Prev::of(&game);
+        self.watch = Some(Watch { game, input: rep.player(), rep, paused: false, back });
         self.acc = 0.0;
         self.screen = Screen::Watching;
     }
@@ -1016,6 +1021,7 @@ impl App {
                 let flags = if left { LEFT } else { 0 } | if right { RIGHT } else { 0 } | if jump { JUMP } else { 0 };
                 self.recorder.record(&mut self.replay, flags, self.game.p.dead != 0);
             }
+            self.prev = Prev::of(&self.game);
             let ev = self.game.tick(left, right, jump);
             self.play_events(ev, a, ch);
         }
@@ -1048,10 +1054,12 @@ impl App {
         let mut events = Vec::new();
         while self.acc >= game::TICK {
             self.acc -= game::TICK;
+            self.prev = Prev::of(&w.game);
             if w.paused {
                 continue;
             }
             for _ in 0..speed {
+                self.prev = Prev::of(&w.game);
                 let ev = w.game.tick_flags(w.input.next());
                 if speed == 1 {
                     events.extend(ev);
@@ -1098,7 +1106,7 @@ impl App {
                 }
             }
             Screen::SaveReplay => {
-                draw(&self.game, a, &chars[self.settings.character]);
+                draw(&self.game, a, &chars[self.settings.character], Prev::of(&self.game), 1.0);
                 dim(0.6);
                 draw_texture_ex(&a.replay_bg, 120.0, 140.0, WHITE, DrawTextureParams { dest_size: Some(vec2(380.0, 200.0)), ..Default::default() });
                 a.black.draw_scaled("SAVE REPLAY", 140.0, 150.0, WHITE, 0.75);
@@ -1111,7 +1119,7 @@ impl App {
             }
             Screen::Playing if self.post == Post::Unlock => draw_unlock(a),
             Screen::Playing => {
-                draw(&self.game, a, &chars[self.settings.character]);
+                draw(&self.game, a, &chars[self.settings.character], self.prev, (self.acc / game::TICK) as f32);
                 if self.game.paused {
                     dim(0.5);
                     a.big.draw_centre("Game Paused", 320.0, 150.0, WHITE);
@@ -1124,7 +1132,8 @@ impl App {
             }
             Screen::Watching => {
                 if let Some(w) = &self.watch {
-                    draw(&w.game, a, &chars[w.rep.character.min(chars.len() - 1)]);
+                    let t = if w.paused { 1.0 } else { (self.acc / game::TICK) as f32 };
+                    draw(&w.game, a, &chars[w.rep.character.min(chars.len() - 1)], self.prev, t);
                     draw_vcr(a, w);
                 }
             }
@@ -1140,7 +1149,7 @@ impl App {
     /// Whatever screen sits behind the profile view.
     fn draw_back(&mut self, a: &Assets, chars: &[Character]) {
         if self.view_back == Screen::Playing {
-            draw(&self.game, a, &chars[self.settings.character]);
+            draw(&self.game, a, &chars[self.settings.character], Prev::of(&self.game), 1.0);
         } else {
             self.draw_title_back(a);
         }

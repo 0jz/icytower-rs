@@ -44,13 +44,27 @@ def labels(rgba: np.ndarray, max_colours: int = MAX_COLOURS, split: float | None
     return lab
 
 
+def shrink2(img: np.ndarray) -> np.ndarray:
+    """Halve an RGBA image by averaging 2x2 blocks (alpha-weighted): anti-aliases traced edges."""
+    h, w = img.shape[0] // 2, img.shape[1] // 2
+    f = img.astype(np.float32).reshape(h, 2, w, 2, 4)
+    a = f[..., 3:4]
+    rgb = (f[..., :3] * a).sum(axis=(1, 3)) / np.maximum(a.sum(axis=(1, 3)), 1e-6)
+    out = np.concatenate([rgb, a.mean(axis=(1, 3))], axis=-1)
+    return np.clip(out + 0.5, 0, 255).astype(np.uint8)
+
+
 def trace(rgba: np.ndarray, wrap: bool = False, max_colours: int = MAX_COLOURS, sigma: float = SIGMA,
-          flat: bool = False, split: float | None = None, ink: bool = False) -> np.ndarray:
-    """flat: fill each region with one solid colour (crisp text) instead of blended shading.
+          flat: bool = False, split: float | None = None, ink: bool = False, scale: int = SCALE,
+          level: float = 0.5, light_bias: float = 1.0) -> np.ndarray:
+    """flat: fill each region with one solid colour instead of shading it from its own pixels.
+    scale: output size multiple; sigma is in output pixels.
+    level: where the shape's edge falls in the blurred mask (lower = thicker letters).
+    light_bias: >1 favours the lightest region where it meets darker ones (thicker white fill).
     ink: dark text whose light pixels are only edge softening: darkness = how much ink a pixel
     holds, and the result is one dark colour (no pale halo)."""
     zmode, gmode = ("grid-wrap", "wrap") if wrap else ("nearest", "nearest")
-    up = lambda a: gaussian_filter(zoom(a, SCALE, order=1, mode=zmode, grid_mode=True), sigma, mode=gmode)
+    up = lambda a: gaussian_filter(zoom(a, scale, order=1, mode=zmode, grid_mode=True), sigma, mode=gmode)
     lab = labels(rgba, max_colours, split)
     rgb = rgba[..., :3].astype(np.float32)
     h, w = lab.shape
@@ -64,14 +78,15 @@ def trace(rgba: np.ndarray, wrap: bool = False, max_colours: int = MAX_COLOURS, 
         cover = (lab > 0).astype(np.float32)
     # shape first: all visible pixels together vs transparency, so a stroke made of several
     # shades isn't split into pieces that each lose to the background
-    shape = up(cover) >= 0.5
-    best = np.full((h * SCALE, w * SCALE), -1.0, np.float32)
-    out = np.zeros((h * SCALE, w * SCALE, 4), np.float32)
+    shape = up(cover) >= level
+    lightest = lab.max()
+    best = np.full((h * scale, w * scale), -1.0, np.float32)
+    out = np.zeros((h * scale, w * scale, 4), np.float32)
     for l in np.unique(lab):
         if l == 0:
             continue
         m = (lab == l).astype(np.float32)
-        weight = up(m)
+        weight = up(m) * (light_bias if l == lightest and lightest > 1 else 1.0)
         win = (weight > best) & shape
         best[win] = weight[win]
         if flat:
@@ -87,29 +102,82 @@ def trace(rgba: np.ndarray, wrap: bool = False, max_colours: int = MAX_COLOURS, 
 FONT_SPLIT = 170  # letters are just dark (outline, inner lines) or light (fill), by brightness
 FONT_SIGMA = 1.5  # outlined fonts
 THIN_SIGMA = 1.2  # fonts under 20px tall have 1px strokes; round them less so they don't break
+FONT_SOFTEN = 1.5  # gradient width at colour edges, in 4x pixels (0 = hard edges; 4 = one original pixel)
+# thickness calibration, measured so HD letters cover the same area as the originals
+# (tools/trace.py --check-fonts prints the ratios)
+FONT_LEVEL = {"thin": 0.45, "outlined": 0.5}
+FONT_LIGHT_BIAS = 1.75
 PAD = 3
+
+
+def soften(img: np.ndarray, sigma: float) -> np.ndarray:
+    """Gaussian blur with premultiplied alpha, so transparent pixels don't darken the edges."""
+    if sigma <= 0:
+        return img
+    f = img.astype(np.float32)
+    a = gaussian_filter(f[..., 3], sigma)
+    rgb = np.stack([gaussian_filter(f[..., c] * f[..., 3], sigma) for c in range(3)], axis=-1) / np.maximum(a, 1e-6)[..., None]
+    return np.clip(np.concatenate([rgb, a[..., None]], axis=-1) + 0.5, 0, 255).astype(np.uint8)
 
 
 def trace_font(rgba: np.ndarray, widths: list[int], ink: bool = False) -> np.ndarray:
     """A font strip, one glyph at a time so no letter bleeds into its neighbour's cell.
-    ink: plain dark letters (FONT_MED_BLACK) rather than light letters with a dark outline."""
+    ink: plain dark letters (FONT_MED_BLACK) rather than light letters with a dark outline.
+
+    Most original glyphs touch their cell's edges, so each HD glyph keeps a transparent gutter of
+    PAD original pixels on every side for its soft edge (main.rs FONT_GUTTER draws it):
+    glyph i sits at x = 4*cell_x + 2*G*i, the strip is 4*height + 2*G tall, G = PAD*SCALE."""
     h = rgba.shape[0]
+    g = PAD * SCALE
     sigma = THIN_SIGMA if h < 20 else FONT_SIGMA
-    out = np.zeros((h * SCALE, rgba.shape[1] * SCALE, 4), np.uint8)
+    level = FONT_LEVEL["thin" if h < 20 else "outlined"]
+    out = np.zeros((h * SCALE + 2 * g, rgba.shape[1] * SCALE + 2 * g * len(widths), 4), np.uint8)
     x = 0
-    for w in widths:
+    for i, w in enumerate(widths):
         cell = np.zeros((h + 2 * PAD, w + 2 * PAD, 4), np.uint8)  # transparent margin to round into
         cell[PAD:PAD + h, PAD:PAD + w] = rgba[:, x:x + w]
         if cell[..., 3].any():
-            t = trace(cell, sigma=sigma, flat=True, split=FONT_SPLIT, ink=ink)
-            p = PAD * SCALE
-            out[:, x * SCALE:(x + w) * SCALE] = t[p:p + h * SCALE, p:p + w * SCALE]
+            # solid fill/outline traced at 8x and halved (anti-aliased curves), then a slight blur
+            # that brings back the original's soft step between fill, outline and background
+            t = shrink2(trace(cell, sigma=2 * sigma, flat=True, split=FONT_SPLIT, ink=ink, scale=2 * SCALE,
+                              level=level, light_bias=FONT_LIGHT_BIAS))
+            t = soften(t, FONT_SOFTEN / 2 if h < 20 else FONT_SOFTEN)  # thin strokes blur away faster
+            ox = x * SCALE + 2 * g * i
+            out[:, ox:ox + t.shape[1]] = t
         x += w
     return out
 
 
+def font_ratios(src: np.ndarray, hd: np.ndarray, widths: list[int], ink: bool) -> tuple[float, float | None]:
+    """HD / original area of the whole letters and of their light fill (1.0 = same thickness)."""
+    g = PAD * SCALE
+    sd, t = src.astype(np.float32), hd.astype(np.float32)
+    lum = lambda a: a[..., :3].mean(-1)
+    on = sd[..., 3] >= 128
+    if ink:
+        a_sd = ((1 - lum(sd) / 255) * on).sum() * SCALE ** 2
+        a_hd = ((1 - lum(t) / 255) * t[..., 3] / 255).sum()
+        return a_hd / a_sd, None
+    a_sd = on.sum() * SCALE ** 2
+    l_sd = (on & (lum(sd) >= FONT_SPLIT)).sum() * SCALE ** 2
+    a_hd = (t[..., 3] / 255).sum()
+    l_hd = (t[..., 3] / 255 * (lum(t) >= FONT_SPLIT)).sum()
+    return a_hd / a_sd, (l_hd / l_sd if l_sd else None)
+
+
+def check_fonts(src_root: Path, dst_root: Path) -> None:
+    for f in sorted(src_root.glob("data/FONT_*.png")):
+        ws = [int(w) for w in f.with_suffix(".widths").read_text().split()]
+        sd = np.asarray(Image.open(f).convert("RGBA"))
+        hd = np.asarray(Image.open(dst_root / f.relative_to(src_root)).convert("RGBA"))
+        total, fill = font_ratios(sd, hd, ws, "BLACK" in f.name)
+        print(f"{f.name}: letters {total:.2f}" + (f", white fill {fill:.2f}" if fill else ""))
+
+
 def main() -> None:
     src_root, dst_root = Path(sys.argv[1]), Path(sys.argv[2])
+    if sys.argv[3:] == ["--check-fonts"]:
+        return check_fonts(src_root, dst_root)
     files = sorted({f for g in (sys.argv[3:] or GAMEPLAY) for f in src_root.glob(g)})
     for f in files:
         rgba = np.asarray(Image.open(f).convert("RGBA"))

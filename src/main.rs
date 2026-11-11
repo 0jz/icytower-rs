@@ -64,12 +64,18 @@ impl Tex {
     }
 
     fn pick(&self) -> &Texture2D {
-        match &self.hd {
-            Some(hd) if HD.load(Ordering::Relaxed) => hd,
-            _ => &self.sd,
-        }
+        self.hd_now().unwrap_or(&self.sd)
+    }
+
+    /// The HD texture, when there is one and HD Graphics is on.
+    fn hd_now(&self) -> Option<&Texture2D> {
+        self.hd.as_ref().filter(|_| HD.load(Ordering::Relaxed))
     }
 }
+
+/// tools/trace.py gives every HD font glyph this many HD pixels of transparent margin on each
+/// side (its PAD * SCALE), so soft letter edges can spill past the original glyph cell.
+const FONT_GUTTER: f32 = 12.0;
 
 /// Shadows macroquad's: draws a `Tex` at its original size whichever texture is used.
 pub fn draw_texture(t: &Tex, x: f32, y: f32, color: Color) {
@@ -135,10 +141,30 @@ impl BmpFont {
         s.bytes().map(|c| self.w.get(c.wrapping_sub(32) as usize).copied().unwrap_or(0.0)).sum()
     }
 
+    /// The HD strip and its scale when it uses tools/trace.py's gutter layout.
+    fn gutter_hd(&self) -> Option<(&Texture2D, f32)> {
+        let hd = self.tex.hd_now()?;
+        let k = (hd.height() - 2.0 * FONT_GUTTER) / self.tex.height();
+        let expected = k * self.tex.width() + 2.0 * FONT_GUTTER * self.w.len() as f32;
+        ((hd.width() - expected).abs() < 0.5 && k > 0.0).then_some((hd, k))
+    }
+
     fn draw_scaled(&self, s: &str, mut x: f32, y: f32, color: Color, scale: f32) {
+        let gutter = self.gutter_hd();
         for c in s.bytes() {
             let i = c.wrapping_sub(32) as usize;
             if i >= self.w.len() { continue; }
+            if let Some((hd, k)) = gutter {
+                // glyph plus its transparent gutter, so soft edges past the cell aren't cut off
+                let g = FONT_GUTTER / k * scale; // gutter in screen units
+                macroquad::prelude::draw_texture_ex(hd, x - g, y - g, color, DrawTextureParams {
+                    source: Some(Rect::new(self.x[i] * k + 2.0 * FONT_GUTTER * i as f32, 0.0, self.w[i] * k + 2.0 * FONT_GUTTER, hd.height())),
+                    dest_size: Some(vec2(self.w[i] * scale + 2.0 * g, self.tex.height() * scale + 2.0 * g)),
+                    ..Default::default()
+                });
+                x += self.w[i] * scale;
+                continue;
+            }
             draw_texture_ex(&self.tex, x, y, color, DrawTextureParams {
                 source: Some(Rect::new(self.x[i], 0.0, self.w[i], self.tex.height())),
                 dest_size: Some(vec2(self.w[i] * scale, self.tex.height() * scale)),
